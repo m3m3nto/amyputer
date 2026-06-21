@@ -79,6 +79,28 @@ void feedAudio() {
   }
 }
 
+// ─── Midi mapping ───────────────────────
+int getMidiNote(char key) {
+  switch(key) {
+    case 'a': return 60; // DO  (C4)
+    case 'w': return 61; // DO#
+    case 's': return 62; // RE  (D4)
+    case 'e': return 63; // RE#
+    case 'd': return 64; // MI  (E4)
+    case 'f': return 65; // FA  (F4)
+    case 't': return 66; // FA#
+    case 'g': return 67; // SOL (G4)
+    case 'y': return 68; // SOL#
+    case 'h': return 69; // LA  (A4)
+    case 'u': return 70; // LA#
+    case 'j': return 71; // SI  (B4)
+    case 'k': return 72; // DO  (C5)
+    case 'i': return 73; // DO#
+    case 'l': return 74; // RE  (D5)
+    default:  return -1; // Tasto non musicale
+  }
+}
+
 // ─── Synth setup ──────────────────────────────────────────────────────────────
 void setupSynth(int patch) {
   amy_event s = amy_default_event();
@@ -150,11 +172,10 @@ void loop() {
       Keyboard_Class::KeysState status = M5Cardputer.Keyboard.keysState();
       
       for (auto key : status.word) {
-        if (key >= 'a' && key <= 'z') {
-          // Monofonia: se stava già suonando una nota, spegnila prima di avviare la nuova
+        int note = getMidiNote(key);
+        if (note != -1) {
           if (isNotePlaying) noteOff();
-
-          currentNote = 60 + (key - 'a');
+          currentNote = note;
           noteOn(currentNote, currentPatch);
           isNotePlaying = true;
           updateDisplay();
