@@ -11,8 +11,9 @@ Preferences preferences;
 int   currentPatch  = 0;
 int   currentBank   = 0; // 0 = Analog (0-127), 128 = FM DX7 (128-255)
 int   currentNote   = 60;
-float currentVolume = 0.99f;
+float currentVolume = 0.80f;
 bool need_display_update = false;
+char lastDebugMsg[64] = "Ready";
 unsigned long last_display_time = 0;
 std::vector<int> activeNotes;
 
@@ -61,32 +62,26 @@ int nrpn_value_msb = -1;
 
 // --- Persistent Memory (NVS) Functions ---
 void saveMidiBindings() {
-  preferences.begin("amyputer", false); // Open namespace in write mode
+  preferences.begin("amyputer", false);
   preferences.putBytes("bindings", bindings, sizeof(bindings));
   preferences.end();
 }
 
 void loadMidiBindings() {
-  preferences.begin("amyputer", true); // Open namespace in read mode
+  preferences.begin("amyputer", true);
   if (preferences.getBytesLength("bindings") == sizeof(bindings)) {
     preferences.getBytes("bindings", bindings, sizeof(bindings));
   }
   preferences.end();
 }
 
-// --- On-screen debug ---
-// --- On-screen debug ---
+// --- On-screen debug (DEFERRED TO PREVENT XRUNS) ---
 void debugLog(const char* fmt, ...) {
-  char buf[128];
   va_list args;
   va_start(args, fmt);
-  vsnprintf(buf, sizeof(buf), fmt, args);
-  va_end(args);
-  
-  M5Cardputer.Display.setCursor(0, 115);
-  M5Cardputer.Display.setTextColor(YELLOW, BLACK);
-  M5Cardputer.Display.setTextSize(1);
-  M5Cardputer.Display.printf("%-40s", buf); 
+  vsnprintf(lastDebugMsg, sizeof(lastDebugMsg), fmt, args);
+  va_end(args);  
+  need_display_update = true;
 }
 
 // --- Wire Protocol Helper for Effects ---
@@ -100,7 +95,6 @@ void sendAmyMessage(const char* msg) {
 // --- Effects ---
 void applyChorus() {
   if (fx_chorus_on) {
-    // BOOSTED: Level 1.0, max_delay 320, lfo 0.5Hz, extreme depth 1.0
     sendAmyMessage("y0k1.0,320,0.5,1.0Z");
   } else {
     sendAmyMessage("y0k0Z");  
@@ -122,10 +116,9 @@ const char* getPatchType(int patch_id) {
 // --- Display ---
 void updateDisplay() {
   M5Cardputer.Display.setCursor(0, 10);
-  
   M5Cardputer.Display.setTextColor(GREEN, BLACK);
   M5Cardputer.Display.setTextSize(1.5);
-  M5Cardputer.Display.printf("AmyPuter\n\n");
+  M5Cardputer.Display.printf("AMYPUTER\n\n");
   
   M5Cardputer.Display.printf("Patch:  %-3d\n", currentPatch);
   
@@ -133,16 +126,15 @@ void updateDisplay() {
   M5Cardputer.Display.printf("Type:   %-20s\n", getPatchType(currentPatch));
   
   M5Cardputer.Display.setTextColor(GREEN, BLACK);
-  M5Cardputer.Display.printf("Note:   %-3d\n", currentNote);
   M5Cardputer.Display.printf("Volume: %-3.0f%% \n", currentVolume * 100); 
   
   M5Cardputer.Display.setTextColor(ORANGE, BLACK);
   M5Cardputer.Display.printf("RAM:    %-3d KB free \n", ESP.getFreeHeap() / 1024);
   M5Cardputer.Display.printf("MaxBlk: %-3d KB    \n", ESP.getMaxAllocHeap() / 1024);
   
-  M5Cardputer.Display.setTextSize(1);
+  M5Cardputer.Display.setTextSize(1.5);
   M5Cardputer.Display.setTextColor(fx_chorus_on ? GREEN : DARKGREY, BLACK);
-  M5Cardputer.Display.printf("CHO \n");
+  M5Cardputer.Display.printf("Chorus: %-3s \n", fx_chorus_on ? "ON " : "OFF");
 }
 
 // --- Audio ---
@@ -197,7 +189,7 @@ void setupSynth(int patch) {
   amy_event s = amy_default_event();
   s.synth        = 1;
   s.patch_number = patch;
-  s.num_voices   = 6;
+  s.num_voices   = 4;
   amy_add_event(&s);
   debugLog("Patch: %d", patch);
 }
@@ -218,8 +210,9 @@ void noteOff(int note) {
   amy_add_event(&off);
 }
 
-// --- Parameter update ---
+// --- Parameter update (Ultra-Optimized) ---
 void updateSynthParameter(SynthParam param, float normalizedValue) {
+  if (currentBank == 128 && param != PARAM_CHORUS) return;
   amy_event mod = amy_default_event();
   mod.synth = 1;
   bool updateEnvelope = false;
@@ -228,21 +221,18 @@ void updateSynthParameter(SynthParam param, float normalizedValue) {
     case PARAM_CUTOFF: {
       mod.filter_freq_coefs[0] = 20.0f + (normalizedValue * normalizedValue * 10000.0f);
       amy_add_event(&mod);
-      debugLog("Cutoff: %.0f Hz", mod.filter_freq_coefs[0]);
       break;
     }
     case PARAM_RESONANCE:
       mod.resonance = 0.5f + (normalizedValue * 9.5f);
       amy_add_event(&mod);
-      debugLog("Resonance: %.2f", mod.resonance);
       break;
     case PARAM_ATTACK:
       env_attack_ms = max(5, (int)(normalizedValue * 3000.0f));
       updateEnvelope = true; break;
     case PARAM_DECAY:
       env_decay_ms = max(5, (int)(normalizedValue * 3000.0f));
-      updateEnvelope = true;
-      break;
+      updateEnvelope = true; break;
     case PARAM_SUSTAIN:
       env_sustain = normalizedValue;
       updateEnvelope = true; break;
@@ -255,13 +245,10 @@ void updateSynthParameter(SynthParam param, float normalizedValue) {
   }
 
   if (updateEnvelope) {
-    // Declare ONLY 3 pairs. AMY will automatically treat the last one (index 2) as Release.
     mod.eg0_times[0] = env_attack_ms;   mod.eg0_values[0] = 1.0f;
     mod.eg0_times[1] = env_decay_ms;    mod.eg0_values[1] = env_sustain;
     mod.eg0_times[2] = env_release_ms;  mod.eg0_values[2] = 0.0f;
-    
     amy_add_event(&mod);
-    debugLog("ENV A:%d D:%d S:%.1f R:%d", env_attack_ms, env_decay_ms, env_sustain, env_release_ms);
   }
 }
 
@@ -272,17 +259,16 @@ void setup() {
 
   auto cfg = M5.config();
   M5Cardputer.begin(cfg, true);
-  M5Cardputer.Speaker.setVolume((uint8_t)(currentVolume * 255));
+  M5Cardputer.Speaker.setVolume((uint8_t)(currentVolume * 180));
   M5Cardputer.Display.setRotation(1);
   
-  // Load saved MIDI mappings from NVRAM
   loadMidiBindings();
-
-  // AMY Engine Initialization
+  
   amy_config_t amyCfg = amy_default_config();
   amyCfg.audio = AMY_AUDIO_IS_NONE;
   amyCfg.features.default_synths = 1;
   amyCfg.features.chorus = 1;
+  // ELIMINATE le due righe inesistenti!
   amy_start(amyCfg);              
 
   setupSynth(currentPatch);
@@ -295,8 +281,6 @@ void loop() {
   // 1. USB MIDI engine
   midiEventPacket_t rx;
   while (MIDI.readPacket(&rx)) {
-
-    // Note ON
     if (rx.header == 0x09) {
       uint8_t note     = rx.byte2;
       uint8_t velocity = rx.byte3;
@@ -312,26 +296,18 @@ void loop() {
         need_display_update = true;
       }
     }
-    // Note OFF
     else if (rx.header == 0x08) {
       noteOff(rx.byte2);
     }
-    // CC / NRPN
     else if (rx.header == 0x0B) {
       uint8_t cc_num = rx.byte2;
       uint8_t cc_val = rx.byte3;
-
       bool  is_nrpn_event  = false;
       int   current_ctrl_id = -1;
       float normalized_val  = 0.0f;
 
-      // NRPN state machine
-      if (cc_num == 99) { nrpn_param_msb = cc_val;
-        continue; 
-      }
-      if (cc_num == 98) { nrpn_param_lsb = cc_val; 
-        continue;
-      }
+      if (cc_num == 99) { nrpn_param_msb = cc_val; continue; }
+      if (cc_num == 98) { nrpn_param_lsb = cc_val; continue; }
 
       if (cc_num == 6) {
         nrpn_value_msb = cc_val;
@@ -348,28 +324,21 @@ void loop() {
           normalized_val  = (float)full_value / 16383.0f;
         }
       } else {
-        // Standard CC
         is_nrpn_event   = false;
         current_ctrl_id = cc_num;
         normalized_val  = (float)cc_val / 127.0f;
       }
 
       if (current_ctrl_id != -1) {
-        // Learn mode mapping
         if (learning_param != PARAM_NONE) {
           bindings[learning_param].is_nrpn = is_nrpn_event;
           bindings[learning_param].ctrl_id = current_ctrl_id;
           debugLog("LEARN P%d -> %s%d", learning_param, is_nrpn_event ? "NRPN" : "CC", current_ctrl_id);
-          
           learning_param = PARAM_NONE;
           saveMidiBindings();
-          // Save mapping persistently
-          
           need_display_update = true;
           continue;
         }
-
-        // Route control
         for (int i = 1; i <= 9; i++) {
           if (bindings[i].ctrl_id  == current_ctrl_id &&
               bindings[i].is_nrpn  == is_nrpn_event) {
@@ -381,8 +350,9 @@ void loop() {
     }
   }
 
-  // 2. Audio streaming
+  // 2. RIPRISTINATO: IL MOTORE AUDIO VIVE DI NUOVO QUI!
   feedAudio();
+  
   M5Cardputer.update();
 
   // 3. Cardputer keyboard
@@ -395,35 +365,33 @@ void loop() {
       int note = getMidiNote(key);
       if (note != -1) currentPressedNotes.push_back(note);
 
-      // Volume
+      // --- Volume UP ---
       if (key == '=') {
-        currentVolume = min(1.0f, currentVolume + 0.1f);
-        M5Cardputer.Speaker.setVolume((uint8_t)(currentVolume * 255));
+        currentVolume += 0.1f;
+        if (currentVolume > 1.0f) currentVolume = 1.0f; // Tetto massimo sicuro al 100%
+        M5Cardputer.Speaker.setVolume((uint8_t)(currentVolume * 180));
         need_display_update = true;
       }
+      
+      // --- Volume DOWN ---
       if (key == '-') {
-        currentVolume = max(0.0f, currentVolume - 0.1f);
-        M5Cardputer.Speaker.setVolume((uint8_t)(currentVolume * 255));
+        currentVolume -= 0.1f;
+        if (currentVolume < 0.0f) currentVolume = 0.0f; // Pavimento a 0%
+        M5Cardputer.Speaker.setVolume((uint8_t)(currentVolume * 180));
         need_display_update = true;
       }
 
-      // MIDI Learn & FX Toggles
       switch(key) {
-        case '1': learning_param = PARAM_CUTOFF;
-          triggerLearnDisplay = true; break;
+        case '1': learning_param = PARAM_CUTOFF; triggerLearnDisplay = true; break;
         case '2': learning_param = PARAM_RESONANCE; triggerLearnDisplay = true; break;
-        case '3': learning_param = PARAM_ATTACK;
-          triggerLearnDisplay = true; break;
-        case '4': learning_param = PARAM_DECAY;     triggerLearnDisplay = true; break;
-        case '5': learning_param = PARAM_SUSTAIN;
-          triggerLearnDisplay = true; break;
-        case '6': learning_param = PARAM_RELEASE;   triggerLearnDisplay = true; break;
+        case '3': learning_param = PARAM_ATTACK; triggerLearnDisplay = true; break;
+        case '4': learning_param = PARAM_DECAY; triggerLearnDisplay = true; break;
+        case '5': learning_param = PARAM_SUSTAIN; triggerLearnDisplay = true; break;
+        case '6': learning_param = PARAM_RELEASE; triggerLearnDisplay = true; break;
         case '0': fx_chorus_on = !fx_chorus_on; applyChorus(); need_display_update = true; break;
         case 'b': 
-          currentBank = (currentBank == 0) ?
-          128 : 0; // Switch 0 <-> 128
+          currentBank = (currentBank == 0) ? 128 : 0; 
           currentPatch = currentBank;
-          // Go to the first patch of the bank
           setupSynth(currentPatch);
           need_display_update = true;
           break;
@@ -438,7 +406,6 @@ void loop() {
       M5Cardputer.Display.printf("LEARN: Move a knob...");
     }
 
-    // Note ON
     for (int note : currentPressedNotes) {
       if (std::find(activeNotes.begin(), activeNotes.end(), note) == activeNotes.end()) {
         noteOn(note);
@@ -446,7 +413,6 @@ void loop() {
       }
     }
     
-    // Note OFF
     for (auto it = activeNotes.begin(); it != activeNotes.end(); ) {
       if (std::find(currentPressedNotes.begin(), currentPressedNotes.end(), *it) == currentPressedNotes.end()) {
         noteOff(*it);
@@ -455,29 +421,23 @@ void loop() {
         ++it;
       }
     }
-
-    // --- Patch navigation ---
     
-    // Forward (Enter key)
     if (status.enter) {
       int offset = (currentPatch - currentBank + 1) % 128;
       currentPatch = currentBank + offset;
-      
       setupSynth(currentPatch);
       need_display_update = true;
     }
 
-    // Backward (Backspace / Delete key)
     if (status.del) {
-      // We add 128 before the modulo operator to safely wrap around negative values in C++
       int offset = (currentPatch - currentBank - 1 + 128) % 128;
       currentPatch = currentBank + offset;
-      
       setupSynth(currentPatch);
       need_display_update = true;
     }
   }
 
+  // LIMITATORE FPS DISPLAY
   if (need_display_update && (millis() - last_display_time > 30)) {
     updateDisplay();
     need_display_update = false;
