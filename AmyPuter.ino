@@ -11,11 +11,13 @@ Preferences preferences;
 int   currentPatch  = 0;
 int   currentBank   = 0; // 0 = Analog (0-127), 128 = FM DX7 (128-255)
 int   currentNote   = 60;
-float currentVolume = 0.95f;
+float currentVolume = 0.99f;
+bool need_display_update = false;
+unsigned long last_display_time = 0;
 std::vector<int> activeNotes;
 
 // --- Triple buffer for audio streaming ---
-static constexpr size_t BUF_SIZE = 512;
+static constexpr size_t BUF_SIZE = 1024;
 static int16_t tri_buf[3][BUF_SIZE * 2];
 static int tri_index   = 0;
 static int tri_buf_pos = 0;
@@ -195,7 +197,7 @@ void setupSynth(int patch) {
   amy_event s = amy_default_event();
   s.synth        = 1;
   s.patch_number = patch;
-  s.num_voices   = 10;
+  s.num_voices   = 6;
   amy_add_event(&s);
   debugLog("Patch: %d", patch);
 }
@@ -285,7 +287,7 @@ void setup() {
 
   setupSynth(currentPatch);
   delay(100);
-  updateDisplay();
+  need_display_update = true;
 }
 
 // --- Main Loop ---
@@ -307,7 +309,7 @@ void loop() {
         on.velocity  = (float)velocity / 127.0f;
         amy_add_event(&on);
         currentNote = note;
-        updateDisplay();
+        need_display_update = true;
       }
     }
     // Note OFF
@@ -363,7 +365,7 @@ void loop() {
           saveMidiBindings();
           // Save mapping persistently
           
-          updateDisplay();
+          need_display_update = true;
           continue;
         }
 
@@ -397,12 +399,12 @@ void loop() {
       if (key == '=') {
         currentVolume = min(1.0f, currentVolume + 0.1f);
         M5Cardputer.Speaker.setVolume((uint8_t)(currentVolume * 255));
-        updateDisplay();
+        need_display_update = true;
       }
       if (key == '-') {
         currentVolume = max(0.0f, currentVolume - 0.1f);
         M5Cardputer.Speaker.setVolume((uint8_t)(currentVolume * 255));
-        updateDisplay();
+        need_display_update = true;
       }
 
       // MIDI Learn & FX Toggles
@@ -416,14 +418,14 @@ void loop() {
         case '5': learning_param = PARAM_SUSTAIN;
           triggerLearnDisplay = true; break;
         case '6': learning_param = PARAM_RELEASE;   triggerLearnDisplay = true; break;
-        case '0': fx_chorus_on = !fx_chorus_on; applyChorus(); updateDisplay(); break;
+        case '0': fx_chorus_on = !fx_chorus_on; applyChorus(); need_display_update = true; break;
         case 'b': 
           currentBank = (currentBank == 0) ?
           128 : 0; // Switch 0 <-> 128
           currentPatch = currentBank;
           // Go to the first patch of the bank
           setupSynth(currentPatch);
-          updateDisplay();
+          need_display_update = true;
           break;
       }
     }
@@ -462,7 +464,7 @@ void loop() {
       currentPatch = currentBank + offset;
       
       setupSynth(currentPatch);
-      updateDisplay();
+      need_display_update = true;
     }
 
     // Backward (Backspace / Delete key)
@@ -472,7 +474,13 @@ void loop() {
       currentPatch = currentBank + offset;
       
       setupSynth(currentPatch);
-      updateDisplay();
+      need_display_update = true;
     }
+  }
+
+  if (need_display_update && (millis() - last_display_time > 30)) {
+    updateDisplay();
+    need_display_update = false;
+    last_display_time = millis();
   }
 }
