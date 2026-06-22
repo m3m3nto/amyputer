@@ -73,17 +73,18 @@ void loadMidiBindings() {
 }
 
 // --- On-screen debug ---
+// --- On-screen debug ---
 void debugLog(const char* fmt, ...) {
   char buf[128];
   va_list args;
   va_start(args, fmt);
   vsnprintf(buf, sizeof(buf), fmt, args);
   va_end(args);
-  M5Cardputer.Display.fillRect(0, 110, 240, 25, BLACK);
+  
   M5Cardputer.Display.setCursor(0, 115);
-  M5Cardputer.Display.setTextColor(YELLOW);
+  M5Cardputer.Display.setTextColor(YELLOW, BLACK);
   M5Cardputer.Display.setTextSize(1);
-  M5Cardputer.Display.print(buf);
+  M5Cardputer.Display.printf("%-40s", buf); 
 }
 
 // --- Wire Protocol Helper for Effects ---
@@ -118,32 +119,28 @@ const char* getPatchType(int patch_id) {
 
 // --- Display ---
 void updateDisplay() {
-  M5Cardputer.Display.fillScreen(BLACK);
   M5Cardputer.Display.setCursor(0, 10);
-  M5Cardputer.Display.setTextColor(GREEN);
+  
+  M5Cardputer.Display.setTextColor(GREEN, BLACK);
   M5Cardputer.Display.setTextSize(1.5);
   M5Cardputer.Display.printf("AmyPuter\n\n");
   
-  M5Cardputer.Display.printf("Patch:  %d\n", currentPatch);
-  M5Cardputer.Display.setTextColor(CYAN);
-  M5Cardputer.Display.printf("Type:   %s\n", getPatchType(currentPatch));
+  M5Cardputer.Display.printf("Patch:  %-3d\n", currentPatch);
   
-  M5Cardputer.Display.setTextColor(GREEN);
-  M5Cardputer.Display.printf("Note:   %d\n", currentNote);
-  // --- VISUALIZZAZIONE VOLUME RIPRISTINATA ---
-  M5Cardputer.Display.printf("Volume: %.0f%%\n", currentVolume * 100); 
+  M5Cardputer.Display.setTextColor(CYAN, BLACK);
+  M5Cardputer.Display.printf("Type:   %-20s\n", getPatchType(currentPatch));
   
-  // --- Internal SRAM Monitor ---
-  M5Cardputer.Display.setTextColor(ORANGE);
-  // Total free internal RAM
-  M5Cardputer.Display.printf("RAM:    %d KB free\n", ESP.getFreeHeap() / 1024);
-  // The absolute largest contiguous block available for AMY's buffers
-  M5Cardputer.Display.printf("MaxBlk: %d KB\n", ESP.getMaxAllocHeap() / 1024);
+  M5Cardputer.Display.setTextColor(GREEN, BLACK);
+  M5Cardputer.Display.printf("Note:   %-3d\n", currentNote);
+  M5Cardputer.Display.printf("Volume: %-3.0f%% \n", currentVolume * 100); 
   
-  // FX status bar
+  M5Cardputer.Display.setTextColor(ORANGE, BLACK);
+  M5Cardputer.Display.printf("RAM:    %-3d KB free \n", ESP.getFreeHeap() / 1024);
+  M5Cardputer.Display.printf("MaxBlk: %-3d KB    \n", ESP.getMaxAllocHeap() / 1024);
+  
   M5Cardputer.Display.setTextSize(1);
-  M5Cardputer.Display.setTextColor(fx_chorus_on ? GREEN : DARKGREY);
-  M5Cardputer.Display.printf("CHO\n");
+  M5Cardputer.Display.setTextColor(fx_chorus_on ? GREEN : DARKGREY, BLACK);
+  M5Cardputer.Display.printf("CHO \n");
 }
 
 // --- Audio ---
