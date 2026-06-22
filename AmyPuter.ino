@@ -27,8 +27,6 @@ float env_sustain    = 0.8f;
 int   env_release_ms = 400;
 
 // --- Effects State Variables (On/Off) ---
-bool fx_reverb_on = false;
-bool fx_delay_on  = false;
 bool fx_chorus_on = false;
 
 // --- MIDI Learn & Abstraction Structures ---
@@ -40,8 +38,6 @@ enum SynthParam {
   PARAM_DECAY,     // Key 4
   PARAM_SUSTAIN,   // Key 5
   PARAM_RELEASE,   // Key 6
-  PARAM_REVERB,    // Key 8
-  PARAM_DELAY,     // Key 9
   PARAM_CHORUS     // Key 0
 };
 
@@ -99,16 +95,6 @@ void sendAmyMessage(const char* msg) {
 }
 
 // --- Effects ---
-void applyReverb() {
-  if (fx_reverb_on) {
-    // level 0.6, liveness 0.85, damping 0.5, xover 3000Hz
-    sendAmyMessage("y0h0.6,0.85,0.5,3000Z");
-  } else {
-    sendAmyMessage("y0h0Z");  
-  }
-  debugLog("Reverb: %s", fx_reverb_on ? "ON" : "OFF");
-}
-
 void applyChorus() {
   if (fx_chorus_on) {
     // BOOSTED: Level 1.0, max_delay 320, lfo 0.5Hz, extreme depth 1.0
@@ -117,22 +103,6 @@ void applyChorus() {
     sendAmyMessage("y0k0Z");  
   }
   debugLog("Chorus: %s", fx_chorus_on ? "ON" : "OFF");
-}
-
-void applyDelay() {
-  if (fx_delay_on) {
-    // M = echo: level, delay_ms, max_delay_ms, feedback, filter_coef
-    sendAmyMessage("y0M1.0,150,250,0.95,0Z");
-  } else {
-    sendAmyMessage("y0M0Z");  
-  }
-  debugLog("Delay: %s", fx_delay_on ? "ON" : "OFF");
-}
-
-void applyEffects() {
-  applyReverb();
-  applyChorus();
-  applyDelay();
 }
 
 // --- Patch Type Deductor ---
@@ -157,9 +127,12 @@ void updateDisplay() {
   M5Cardputer.Display.printf("Patch:  %d\n", currentPatch);
   M5Cardputer.Display.setTextColor(CYAN);
   M5Cardputer.Display.printf("Type:   %s\n", getPatchType(currentPatch));
+  
   M5Cardputer.Display.setTextColor(GREEN);
   M5Cardputer.Display.printf("Note:   %d\n", currentNote);
-
+  // --- VISUALIZZAZIONE VOLUME RIPRISTINATA ---
+  M5Cardputer.Display.printf("Volume: %.0f%%\n", currentVolume * 100); 
+  
   // --- Internal SRAM Monitor ---
   M5Cardputer.Display.setTextColor(ORANGE);
   // Total free internal RAM
@@ -169,10 +142,6 @@ void updateDisplay() {
   
   // FX status bar
   M5Cardputer.Display.setTextSize(1);
-  M5Cardputer.Display.setTextColor(fx_reverb_on ? GREEN : DARKGREY);
-  M5Cardputer.Display.printf("REV ");
-  M5Cardputer.Display.setTextColor(fx_delay_on ? GREEN : DARKGREY);
-  M5Cardputer.Display.printf("DLY ");
   M5Cardputer.Display.setTextColor(fx_chorus_on ? GREEN : DARKGREY);
   M5Cardputer.Display.printf("CHO\n");
 }
@@ -211,12 +180,14 @@ void feedAudio() {
 // --- Keyboard MIDI mapping ---
 int getMidiNote(char key) {
   switch(key) {
-    case 'a': return 60; case 'w': return 61;
+    case 'a': return 60;
+    case 'w': return 61;
     case 's': return 62; case 'e': return 63;
     case 'd': return 64; case 'f': return 65;
     case 't': return 66; case 'g': return 67;
     case 'y': return 68; case 'h': return 69;
-    case 'u': return 70; case 'j': return 71;
+    case 'u': return 70;
+    case 'j': return 71;
     case 'k': return 72; case 'i': return 73;
     case 'l': return 74; default:  return -1;
   }
@@ -271,22 +242,21 @@ void updateSynthParameter(SynthParam param, float normalizedValue) {
       updateEnvelope = true; break;
     case PARAM_DECAY:
       env_decay_ms = max(5, (int)(normalizedValue * 3000.0f));
-      updateEnvelope = true; break;
+      updateEnvelope = true;
+      break;
     case PARAM_SUSTAIN:
       env_sustain = normalizedValue;
       updateEnvelope = true; break;
     case PARAM_RELEASE:
       env_release_ms = max(5, (int)(normalizedValue * 5000.0f));
       updateEnvelope = true; break;
-    case PARAM_REVERB:
-    case PARAM_DELAY:
     case PARAM_CHORUS:
     case PARAM_NONE:
       break;
   }
 
   if (updateEnvelope) {
-    // Dichiariamo SOLO 3 coppie. AMY tratterà automaticamente l'ultima (indice 2) come Release.
+    // Declare ONLY 3 pairs. AMY will automatically treat the last one (index 2) as Release.
     mod.eg0_times[0] = env_attack_ms;   mod.eg0_values[0] = 1.0f;
     mod.eg0_times[1] = env_decay_ms;    mod.eg0_values[1] = env_sustain;
     mod.eg0_times[2] = env_release_ms;  mod.eg0_values[2] = 0.0f;
@@ -311,11 +281,9 @@ void setup() {
 
   // AMY Engine Initialization
   amy_config_t amyCfg = amy_default_config();
-  amyCfg.audio               = AMY_AUDIO_IS_NONE;
+  amyCfg.audio = AMY_AUDIO_IS_NONE;
   amyCfg.features.default_synths = 1;
-  amyCfg.features.reverb     = 0; 
-  amyCfg.features.chorus     = 1; 
-  amyCfg.features.echo       = 2; 
+  amyCfg.features.chorus = 1;
   amy_start(amyCfg);              
 
   setupSynth(currentPatch);
@@ -359,8 +327,12 @@ void loop() {
       float normalized_val  = 0.0f;
 
       // NRPN state machine
-      if (cc_num == 99) { nrpn_param_msb = cc_val; continue; }
-      if (cc_num == 98) { nrpn_param_lsb = cc_val; continue; }
+      if (cc_num == 99) { nrpn_param_msb = cc_val;
+        continue; 
+      }
+      if (cc_num == 98) { nrpn_param_lsb = cc_val; 
+        continue;
+      }
 
       if (cc_num == 6) {
         nrpn_value_msb = cc_val;
@@ -391,7 +363,8 @@ void loop() {
           debugLog("LEARN P%d -> %s%d", learning_param, is_nrpn_event ? "NRPN" : "CC", current_ctrl_id);
           
           learning_param = PARAM_NONE;
-          saveMidiBindings(); // Save mapping persistently
+          saveMidiBindings();
+          // Save mapping persistently
           
           updateDisplay();
           continue;
@@ -437,18 +410,21 @@ void loop() {
 
       // MIDI Learn & FX Toggles
       switch(key) {
-        case '1': learning_param = PARAM_CUTOFF;    triggerLearnDisplay = true; break;
+        case '1': learning_param = PARAM_CUTOFF;
+          triggerLearnDisplay = true; break;
         case '2': learning_param = PARAM_RESONANCE; triggerLearnDisplay = true; break;
-        case '3': learning_param = PARAM_ATTACK;    triggerLearnDisplay = true; break;
+        case '3': learning_param = PARAM_ATTACK;
+          triggerLearnDisplay = true; break;
         case '4': learning_param = PARAM_DECAY;     triggerLearnDisplay = true; break;
-        case '5': learning_param = PARAM_SUSTAIN;   triggerLearnDisplay = true; break;
+        case '5': learning_param = PARAM_SUSTAIN;
+          triggerLearnDisplay = true; break;
         case '6': learning_param = PARAM_RELEASE;   triggerLearnDisplay = true; break;
-        case '8': fx_reverb_on = !fx_reverb_on; applyReverb(); updateDisplay(); break;
-        case '9': fx_delay_on  = !fx_delay_on;  applyDelay();  updateDisplay(); break;
         case '0': fx_chorus_on = !fx_chorus_on; applyChorus(); updateDisplay(); break;
         case 'b': 
-          currentBank = (currentBank == 0) ? 128 : 0; // Switch 0 <-> 128
-          currentPatch = currentBank;                 // Vai alla prima patch del banco
+          currentBank = (currentBank == 0) ?
+          128 : 0; // Switch 0 <-> 128
+          currentPatch = currentBank;
+          // Go to the first patch of the bank
           setupSynth(currentPatch);
           updateDisplay();
           break;
