@@ -258,6 +258,8 @@ void setup() {
   USB.begin();
 
   auto cfg = M5.config();
+  cfg.internal_mic = false;
+  cfg.internal_rtc = false;
   M5Cardputer.begin(cfg, true);
   M5Cardputer.Speaker.setVolume((uint8_t)(currentVolume * 180));
   M5Cardputer.Display.setRotation(1);
@@ -268,7 +270,6 @@ void setup() {
   amyCfg.audio = AMY_AUDIO_IS_NONE;
   amyCfg.features.default_synths = 1;
   amyCfg.features.chorus = 1;
-  // ELIMINATE le due righe inesistenti!
   amy_start(amyCfg);              
 
   setupSynth(currentPatch);
@@ -284,16 +285,18 @@ void loop() {
     if (rx.header == 0x09) {
       uint8_t note     = rx.byte2;
       uint8_t velocity = rx.byte3;
+      
       if (velocity == 0) {
         noteOff(note);
       } else {
         amy_event on = amy_default_event();
         on.synth     = 1;
         on.midi_note = note;
-        on.velocity  = (float)velocity / 127.0f;
+        
+        // --- NORMALIZZAZIONE DELLA VELOCITY MIDI ---
+        on.velocity  = 0.6f + (((float)velocity / 127.0f) * 0.4f);
+        
         amy_add_event(&on);
-        currentNote = note;
-        need_display_update = true;
       }
     }
     else if (rx.header == 0x08) {
