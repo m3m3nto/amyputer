@@ -437,7 +437,7 @@ void loop() {
     }
   }
 
-  // LIMITATORE FPS DISPLAY
+  // Display FPS limiter
   if (need_display_update && (millis() - last_display_time > 30)) {
     updateDisplay();
     need_display_update = false;
