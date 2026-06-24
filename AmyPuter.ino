@@ -1,21 +1,26 @@
 #include "M5Cardputer.h"
 #include "AMY-Arduino.h"
-#include <vector>
 #include "USB.h"
 #include "USBMIDI.h"
 #include <Preferences.h>
 
+// --- Global Objects ---
 USBMIDI MIDI;
 Preferences preferences;
 
-int   currentPatch  = 0;
-int   currentBank   = 0; // 0 = Analog (0-127), 128 = FM DX7 (128-255)
-int   currentNote   = 60;
-float currentVolume = 0.80f;
+// --- Synthesizer State ---
+int   currentPatch       = 0;
+int   currentBank        = 0; // 0 = Analog (0-127), 128 = FM DX7 (128-255)
+float currentVolume      = 0.80f;
+int   currentMidiChannel = 0; // 0 = OMNI (All channels), 1-16 = Specific channel
+
+// --- System & Display State ---
 bool need_display_update = false;
 char lastDebugMsg[64] = "Ready";
 unsigned long last_display_time = 0;
-std::vector<int> activeNotes;
+
+// --- Optimized Keyboard Tracking (No std::vector!) ---
+bool activeNotes[128] = {false};
 
 // --- Triple buffer for audio streaming ---
 static constexpr size_t BUF_SIZE = 1024;
@@ -28,6 +33,10 @@ int   env_attack_ms  = 50;
 int   env_decay_ms   = 200;
 float env_sustain    = 0.8f;
 int   env_release_ms = 400;
+float env_filter_amt = 0.0f;
+float lfo_amount     = 0.0f;
+float lfo_rate_hz    = 1.0f;
+int   lfo_wave       = 0;
 
 // --- Effects State Variables (On/Off) ---
 bool fx_chorus_on = false;
@@ -41,6 +50,10 @@ enum SynthParam {
   PARAM_DECAY,     // Key 4
   PARAM_SUSTAIN,   // Key 5
   PARAM_RELEASE,   // Key 6
+  PARAM_ENV_FILTER,// Key 7
+  PARAM_LFO_AMOUNT,// Key 8
+  PARAM_LFO_RATE,  // Key 9
+  PARAM_LFO_WAVE,  // 
   PARAM_CHORUS     // Key 0
 };
 
@@ -75,7 +88,7 @@ void loadMidiBindings() {
   preferences.end();
 }
 
-// --- On-screen debug (DEFERRED TO PREVENT XRUNS) ---
+// --- On-screen debug (Deferred to prevent XRUNS) ---
 void debugLog(const char* fmt, ...) {
   va_list args;
   va_start(args, fmt);
@@ -89,7 +102,7 @@ void sendAmyMessage(const char* msg) {
   char buffer[128];
   strncpy(buffer, msg, sizeof(buffer) - 1);
   buffer[sizeof(buffer) - 1] = '\0';
-  amy_add_message(buffer); 
+  amy_add_message(buffer);
 }
 
 // --- Effects ---
@@ -113,6 +126,24 @@ const char* getPatchType(int patch_id) {
   }
 }
 
+// --- Parameter Name Deductor ---
+const char* getParamName(SynthParam param) {
+  switch(param) {
+    case PARAM_CUTOFF:     return "Cutoff";
+    case PARAM_RESONANCE:  return "Resonance";
+    case PARAM_ATTACK:     return "Attack";
+    case PARAM_DECAY:      return "Decay";
+    case PARAM_SUSTAIN:    return "Sustain";
+    case PARAM_RELEASE:    return "Release";
+    case PARAM_ENV_FILTER: return "Env Filter";
+    case PARAM_LFO_AMOUNT: return "LFO Amt";
+    case PARAM_LFO_RATE:   return "LFO Rate";
+    case PARAM_LFO_WAVE:   return "LFO Wave";
+    case PARAM_CHORUS:     return "Chorus";
+    default:               return "Unknown";
+  }
+}
+
 // --- Display ---
 void updateDisplay() {
   M5Cardputer.Display.setCursor(0, 10);
@@ -132,13 +163,20 @@ void updateDisplay() {
   M5Cardputer.Display.printf("RAM:    %-3d KB free \n", ESP.getFreeHeap() / 1024);
   M5Cardputer.Display.printf("MaxBlk: %-3d KB    \n", ESP.getMaxAllocHeap() / 1024);
   
+  M5Cardputer.Display.setTextColor(YELLOW, BLACK);
+  if (currentMidiChannel == 0) {
+    M5Cardputer.Display.printf("MIDI Ch: OMNI \n");
+  } else {
+    M5Cardputer.Display.printf("MIDI Ch: %-2d   \n", currentMidiChannel);
+  }
+
   M5Cardputer.Display.setTextSize(1.5);
   M5Cardputer.Display.setTextColor(fx_chorus_on ? GREEN : DARKGREY, BLACK);
   M5Cardputer.Display.printf("Chorus: %-3s \n", fx_chorus_on ? "ON " : "OFF");
 }
 
-// --- Audio ---
-void flushAudioBuffer() {
+// --- Audio Engine (Mapped to Fast RAM) ---
+void IRAM_ATTR flushAudioBuffer() {
   if (tri_buf_pos == 0) return;
   bool success = false;
   while (!success) {
@@ -152,7 +190,7 @@ void flushAudioBuffer() {
   tri_buf_pos = 0;
 }
 
-void feedAudio() {
+void IRAM_ATTR feedAudio() {
   int16_t* amy_buf = (int16_t*)amy_update();
   if (amy_buf == nullptr) return;
   int samples = AMY_BLOCK_SIZE * 2;
@@ -171,14 +209,12 @@ void feedAudio() {
 // --- Keyboard MIDI mapping ---
 int getMidiNote(char key) {
   switch(key) {
-    case 'a': return 60;
-    case 'w': return 61;
+    case 'a': return 60; case 'w': return 61;
     case 's': return 62; case 'e': return 63;
     case 'd': return 64; case 'f': return 65;
     case 't': return 66; case 'g': return 67;
     case 'y': return 68; case 'h': return 69;
-    case 'u': return 70;
-    case 'j': return 71;
+    case 'u': return 70; case 'j': return 71;
     case 'k': return 72; case 'i': return 73;
     case 'l': return 74; default:  return -1;
   }
@@ -198,7 +234,7 @@ void noteOn(int note) {
   amy_event on = amy_default_event();
   on.synth     = 1;
   on.midi_note = note;
-  on.velocity  = 1;
+  on.velocity  = 1.0f; // Internal keyboard always plays at max velocity
   amy_add_event(&on);
 }
 
@@ -212,7 +248,9 @@ void noteOff(int note) {
 
 // --- Parameter update (Ultra-Optimized) ---
 void updateSynthParameter(SynthParam param, float normalizedValue) {
+  // FM SHIELD: If we are in the DX7 bank, ignore analog ADSR/Filter controls
   if (currentBank == 128 && param != PARAM_CHORUS) return;
+
   amy_event mod = amy_default_event();
   mod.synth = 1;
   bool updateEnvelope = false;
@@ -227,6 +265,11 @@ void updateSynthParameter(SynthParam param, float normalizedValue) {
       mod.resonance = 0.5f + (normalizedValue * 9.5f);
       amy_add_event(&mod);
       break;
+    case PARAM_ENV_FILTER:
+      env_filter_amt = normalizedValue * 12000.0f; // Aumentato a 12000 per più botta!
+      mod.filter_freq_coefs[4] = env_filter_amt; 
+      amy_add_event(&mod);
+      break;
     case PARAM_ATTACK:
       env_attack_ms = max(5, (int)(normalizedValue * 3000.0f));
       updateEnvelope = true; break;
@@ -239,6 +282,9 @@ void updateSynthParameter(SynthParam param, float normalizedValue) {
     case PARAM_RELEASE:
       env_release_ms = max(5, (int)(normalizedValue * 5000.0f));
       updateEnvelope = true; break;
+    case PARAM_LFO_AMOUNT:
+    case PARAM_LFO_RATE:
+    case PARAM_LFO_WAVE:
     case PARAM_CHORUS:
     case PARAM_NONE:
       break;
@@ -248,6 +294,11 @@ void updateSynthParameter(SynthParam param, float normalizedValue) {
     mod.eg0_times[0] = env_attack_ms;   mod.eg0_values[0] = 1.0f;
     mod.eg0_times[1] = env_decay_ms;    mod.eg0_values[1] = env_sustain;
     mod.eg0_times[2] = env_release_ms;  mod.eg0_values[2] = 0.0f;
+    
+    mod.eg1_times[0] = env_attack_ms;   mod.eg1_values[0] = 1.0f;
+    mod.eg1_times[1] = env_decay_ms;    mod.eg1_values[1] = env_sustain;
+    mod.eg1_times[2] = env_release_ms;  mod.eg1_values[2] = 0.0f;
+    
     amy_add_event(&mod);
   }
 }
@@ -257,10 +308,12 @@ void setup() {
   MIDI.begin();
   USB.begin();
 
+  // Hardware optimizations: disable unused components to save RAM
   auto cfg = M5.config();
-  cfg.internal_mic = false;
-  cfg.internal_rtc = false;
+  cfg.internal_mic = false; // Frees up I2S/PDM buffers
+  cfg.internal_rtc = false; // Frees up I2C traffic
   M5Cardputer.begin(cfg, true);
+  
   M5Cardputer.Speaker.setVolume((uint8_t)(currentVolume * 180));
   M5Cardputer.Display.setRotation(1);
   
@@ -282,6 +335,16 @@ void loop() {
   // 1. USB MIDI engine
   midiEventPacket_t rx;
   while (MIDI.readPacket(&rx)) {
+    
+    // --- NEW: Global MIDI Channel Filter ---
+    // The lower 4 bits of rx.byte1 contain the channel (0-15). We add 1 to get 1-16.
+    uint8_t msg_channel = (rx.byte1 & 0x0F) + 1; 
+
+    // If we are not in OMNI mode (0) and the channel doesn't match, drop the packet!
+    if (currentMidiChannel != 0 && msg_channel != currentMidiChannel) {
+      continue; 
+    }
+
     if (rx.header == 0x09) {
       uint8_t note     = rx.byte2;
       uint8_t velocity = rx.byte3;
@@ -293,9 +356,10 @@ void loop() {
         on.synth     = 1;
         on.midi_note = note;
         
-        // --- NORMALIZZAZIONE DELLA VELOCITY MIDI ---
+        // --- MIDI VELOCITY NORMALIZATION ---
+        // Compresses dynamics: minimum velocity starts at 60% (0.6)
+        // and scales up to 100% (1.0). Perfect for external sequencers!
         on.velocity  = 0.6f + (((float)velocity / 127.0f) * 0.4f);
-        
         amy_add_event(&on);
       }
     }
@@ -353,7 +417,7 @@ void loop() {
     }
   }
 
-  // 2. RIPRISTINATO: IL MOTORE AUDIO VIVE DI NUOVO QUI!
+  // 2. Audio Engine processing
   feedAudio();
   
   M5Cardputer.update();
@@ -361,29 +425,33 @@ void loop() {
   // 3. Cardputer keyboard
   if (M5Cardputer.Keyboard.isChange()) {
     Keyboard_Class::KeysState status = M5Cardputer.Keyboard.keysState();
-    std::vector<int> currentPressedNotes;
+    
+    // Super fast temporary array (allocated on stack, not heap)
+    bool currentPressedNotes[128] = {false};
     bool triggerLearnDisplay = false;
 
     for (auto key : status.word) {
+      // 1. Check if it's a musical note
       int note = getMidiNote(key);
-      if (note != -1) currentPressedNotes.push_back(note);
+      if (note != -1) {
+        currentPressedNotes[note] = true;
+      }
 
-      // --- Volume UP ---
+      // 2. Check system shortcuts
       if (key == '=') {
         currentVolume += 0.1f;
-        if (currentVolume > 1.0f) currentVolume = 1.0f; // Tetto massimo sicuro al 100%
+        if (currentVolume > 1.0f) currentVolume = 1.0f; // 100% safe maximum ceiling
         M5Cardputer.Speaker.setVolume((uint8_t)(currentVolume * 180));
         need_display_update = true;
       }
-      
-      // --- Volume DOWN ---
       if (key == '-') {
         currentVolume -= 0.1f;
-        if (currentVolume < 0.0f) currentVolume = 0.0f; // Pavimento a 0%
+        if (currentVolume < 0.0f) currentVolume = 0.0f; // 0% floor
         M5Cardputer.Speaker.setVolume((uint8_t)(currentVolume * 180));
         need_display_update = true;
       }
 
+      // 3. Check Synthesizer modifiers
       switch(key) {
         case '1': learning_param = PARAM_CUTOFF; triggerLearnDisplay = true; break;
         case '2': learning_param = PARAM_RESONANCE; triggerLearnDisplay = true; break;
@@ -391,7 +459,15 @@ void loop() {
         case '4': learning_param = PARAM_DECAY; triggerLearnDisplay = true; break;
         case '5': learning_param = PARAM_SUSTAIN; triggerLearnDisplay = true; break;
         case '6': learning_param = PARAM_RELEASE; triggerLearnDisplay = true; break;
+        case '7': learning_param = PARAM_ENV_FILTER; triggerLearnDisplay = true; break;
+        case '8': learning_param = PARAM_LFO_AMOUNT; triggerLearnDisplay = true; break;
+        case '9': learning_param = PARAM_LFO_RATE; triggerLearnDisplay = true; break;
         case '0': fx_chorus_on = !fx_chorus_on; applyChorus(); need_display_update = true; break;
+        case 'c': 
+          currentMidiChannel++;
+          if (currentMidiChannel > 16) currentMidiChannel = 0; // Wrap back to OMNI
+          need_display_update = true;
+          break;
         case 'b': 
           currentBank = (currentBank == 0) ? 128 : 0; 
           currentPatch = currentBank;
@@ -401,46 +477,45 @@ void loop() {
       }
     }
 
+    // Update Display for Learn mode
     if (triggerLearnDisplay && learning_param != PARAM_NONE) {
       M5Cardputer.Display.fillRect(0, 80, 240, 30, RED);
       M5Cardputer.Display.setCursor(10, 88);
       M5Cardputer.Display.setTextColor(WHITE);
       M5Cardputer.Display.setTextSize(1.5);
-      M5Cardputer.Display.printf("LEARN: Move a knob...");
+      M5Cardputer.Display.printf("LEARN [%s]: Move knob", getParamName(learning_param));
     }
 
-    for (int note : currentPressedNotes) {
-      if (std::find(activeNotes.begin(), activeNotes.end(), note) == activeNotes.end()) {
-        noteOn(note);
-        activeNotes.push_back(note);
+    // --- Differential Polyphonic Engine (No dynamic allocations!) ---
+    for (int i = 0; i < 128; i++) {
+      if (currentPressedNotes[i] && !activeNotes[i]) {
+        // Key just pressed
+        noteOn(i);
+        activeNotes[i] = true;
+      } else if (!currentPressedNotes[i] && activeNotes[i]) {
+        // Key just released
+        noteOff(i);
+        activeNotes[i] = false;
       }
     }
     
-    for (auto it = activeNotes.begin(); it != activeNotes.end(); ) {
-      if (std::find(currentPressedNotes.begin(), currentPressedNotes.end(), *it) == currentPressedNotes.end()) {
-        noteOff(*it);
-        it = activeNotes.erase(it);
-      } else {
-        ++it;
-      }
-    }
-    
+    // --- Patch Navigation (Continuous 0-255 loop) ---
     if (status.enter) {
-      int offset = (currentPatch - currentBank + 1) % 128;
-      currentPatch = currentBank + offset;
+      currentPatch = (currentPatch + 1) % 256;
+      currentBank = (currentPatch >= 128) ? 128 : 0; 
       setupSynth(currentPatch);
       need_display_update = true;
     }
 
     if (status.del) {
-      int offset = (currentPatch - currentBank - 1 + 128) % 128;
-      currentPatch = currentBank + offset;
+      currentPatch = (currentPatch - 1 + 256) % 256;
+      currentBank = (currentPatch >= 128) ? 128 : 0; 
       setupSynth(currentPatch);
       need_display_update = true;
     }
   }
 
-  // LIMITATORE FPS DISPLAY
+  // 4. DISPLAY FPS LIMITER
   if (need_display_update && (millis() - last_display_time > 30)) {
     updateDisplay();
     need_display_update = false;
